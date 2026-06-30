@@ -4,12 +4,12 @@
 # SSH Key Generation Script
 # Purpose: Generate SSH key pairs for multiple GitHub repositories
 # Usage:
-#   Interactive mode:        ./ssh-keygen.sh
-#   Single repository:       ./ssh-keygen.sh git@github.com:user/repo.git
-#   Multiple repositories:   ./ssh-keygen.sh repo1.git repo2.git repo3.git
-#   List all keys:           ./ssh-keygen.sh --list
-#   Remove a key:            ./ssh-keygen.sh --remove <repo_name>
-#   Show help:               ./ssh-keygen.sh --help
+#   Interactive mode:        ./ssh-tools.sh
+#   Single repository:       ./ssh-tools.sh git@github.com:user/repo.git
+#   Multiple repositories:   ./ssh-tools.sh repo1.git repo2.git repo3.git
+#   List all keys:           ./ssh-tools.sh --list
+#   Remove a key:            ./ssh-tools.sh --remove <repo_name>
+#   Show help:               ./ssh-tools.sh --help
 #
 # Each repository gets its own key: ~/.ssh/id_ed25519_<repo_name>
 # SSH config uses Host aliases: Host github-<repo_name>
@@ -63,16 +63,16 @@ KEY_PREFIX=""
 # ═══════════════════════════════════════════════════════════════════════════
 
 detect_key_type() {
-    # First ensure ssh-keygen exists
-    if ! command -v ssh-keygen &> /dev/null; then
-        print_error "'ssh-keygen' not found. Install it with: apt-get install openssh-client -y"
+    # First ensure ssh-tools exists
+    if ! command -v ssh-tools &> /dev/null; then
+        print_error "'ssh-tools' not found. Install it with: apt-get install openssh-client -y"
         exit 1
     fi
 
     print_step "Checking supported SSH key types..."
 
     local test_dir
-    test_dir="/tmp/ssh-keygen-test.$$"
+    test_dir="/tmp/ssh-tools-test.$$"
     mkdir -p "$test_dir" 2>/dev/null || {
         print_error "Cannot create temp directory: $test_dir"
         exit 1
@@ -82,7 +82,7 @@ detect_key_type() {
 
     # Try ED25519 first
     printf "  Testing ED25519 support... "
-    if ssh-keygen -t ed25519 -f "$test_key" -N "" -C "test" > /dev/null 2>&1; then
+    if ssh-tools -t ed25519 -f "$test_key" -N "" -C "test" > /dev/null 2>&1; then
         printf "%s%s%s\n" "$GREEN" "supported" "$NC"
         KEY_TYPE="ed25519"
         KEY_PREFIX="id_ed25519"
@@ -94,7 +94,7 @@ detect_key_type() {
 
     # Fallback to RSA 4096
     printf "  Testing RSA 4096 support... "
-    if ssh-keygen -t rsa -b 4096 -f "$test_key" -N "" -C "test" > /dev/null 2>&1; then
+    if ssh-tools -t rsa -b 4096 -f "$test_key" -N "" -C "test" > /dev/null 2>&1; then
         printf "%s%s%s\n" "$GREEN" "supported" "$NC"
         KEY_TYPE="rsa"
         KEY_PREFIX="id_rsa"
@@ -105,7 +105,7 @@ detect_key_type() {
     printf "%s%s%s\n" "$RED" "failed" "$NC"
 
     rm -rf "$test_dir"
-    print_error "ssh-keygen is available but neither ED25519 nor RSA 4096 work."
+    print_error "ssh-tools is available but neither ED25519 nor RSA 4096 work."
     print_error "Try: apt-get update && apt-get install --reinstall openssh-client -y"
     exit 1
 }
@@ -214,8 +214,8 @@ list_existing_keys() {
             if [ -f "$pub_file" ]; then
                 local comment fingerprint key_type_str clone_url
                 comment=$(awk '{print $3}' "$pub_file" 2>/dev/null)
-                fingerprint=$(ssh-keygen -lf "$key_file" 2>/dev/null | awk '{print $2}')
-                key_type_str=$(ssh-keygen -lf "$key_file" 2>/dev/null | awk '{print $1}')
+                fingerprint=$(ssh-tools -lf "$key_file" 2>/dev/null | awk '{print $2}')
+                key_type_str=$(ssh-tools -lf "$key_file" 2>/dev/null | awk '{print $1}')
 
                 clone_url=$(make_clone_command "$name" "$comment")
 
@@ -411,7 +411,7 @@ generate_key_for_repo() {
     if [ -f "$key_path" ]; then
         print_warning "SSH key already exists: ${key_path}"
         local fingerprint
-        fingerprint=$(ssh-keygen -lf "$key_path" 2>/dev/null | awk '{print $2}')
+        fingerprint=$(ssh-tools -lf "$key_path" 2>/dev/null | awk '{print $2}')
         echo -e "  Fingerprint: ${fingerprint:-N/A}"
         echo ""
         read -r -p "  Overwrite this key? (y/N): " -n 1
@@ -436,8 +436,8 @@ generate_key_for_repo() {
     print_step "Generating ${KEY_TYPE^^} SSH key: ${KEY_PREFIX}_${repo_name}"
     echo ""
 
-    if ! ssh-keygen -t "$KEY_TYPE" "${key_bits_args[@]}" -f "$key_path" -N "" -C "$repo_url" 2>&1; then
-        print_error "ssh-keygen failed!"
+    if ! ssh-tools -t "$KEY_TYPE" "${key_bits_args[@]}" -f "$key_path" -N "" -C "$repo_url" 2>&1; then
+        print_error "ssh-tools failed!"
         print_error "Try: apt-get update && apt-get install openssh-client -y"
         exit 1
     fi
@@ -673,18 +673,18 @@ show_usage() {
     echo -e "${BLUE}${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo "Usage:"
-    echo "  ./ssh-keygen.sh                          Interactive mode"
-    echo "  ./ssh-keygen.sh <url>                    Generate key for one repository"
-    echo "  ./ssh-keygen.sh <url1> <url2> ...        Generate keys for multiple repositories"
-    echo "  ./ssh-keygen.sh --list                   List all existing keys and config entries"
-    echo "  ./ssh-keygen.sh --remove <repo_name>     Remove a key and its SSH config entry"
-    echo "  ./ssh-keygen.sh --help                   Show this help message"
+    echo "  ./ssh-tools.sh                          Interactive mode"
+    echo "  ./ssh-tools.sh <url>                    Generate key for one repository"
+    echo "  ./ssh-tools.sh <url1> <url2> ...        Generate keys for multiple repositories"
+    echo "  ./ssh-tools.sh --list                   List all existing keys and config entries"
+    echo "  ./ssh-tools.sh --remove <repo_name>     Remove a key and its SSH config entry"
+    echo "  ./ssh-tools.sh --help                   Show this help message"
     echo ""
     echo "Examples:"
-    echo "  ./ssh-keygen.sh git@github.com:user/Pikatrue.git"
-    echo "  ./ssh-keygen.sh git@github.com:user/repo-a.git git@github.com:user/repo-b.git"
-    echo "  ./ssh-keygen.sh --list"
-    echo "  ./ssh-keygen.sh --remove pikatrue"
+    echo "  ./ssh-tools.sh git@github.com:user/Pikatrue.git"
+    echo "  ./ssh-tools.sh git@github.com:user/repo-a.git git@github.com:user/repo-b.git"
+    echo "  ./ssh-tools.sh --list"
+    echo "  ./ssh-tools.sh --remove pikatrue"
     echo ""
     echo "Key naming:  ~/.ssh/id_ed25519_<repo_name> or ~/.ssh/id_rsa_<repo_name>"
     echo "             (auto-detects supported key type, prefers ED25519)"
@@ -711,7 +711,7 @@ case "$1" in
         ;;
     --remove|-r)
         if [ -z "$2" ]; then
-            print_error "Missing repository name. Usage: ./ssh-keygen.sh --remove <repo_name>"
+            print_error "Missing repository name. Usage: ./ssh-tools.sh --remove <repo_name>"
             exit 1
         fi
         shift
