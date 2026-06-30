@@ -1,13 +1,15 @@
 
 ## SSH Key Tools
 
-Script `ssh-tools.sh` creates ED25519 SSH key pairs for GitHub repositories.  
-Supports **multiple repositories** on the same machine — each repo gets its own key without overwriting others.
+Automated SSH key generation and management for **multiple git repositories** across **any provider** — GitHub, GitLab, Bitbucket, or custom SSH hosts.  
+Each repo gets its own dedicated SSH key without overwriting others.
 
 ### Install
 
 ```shell
 git clone git@github.com:tieutantan/SSH-Key-Tools.git
+cd SSH-Key-Tools
+chmod +x ssh-tools.sh
 ```
 
 ### Usage
@@ -16,11 +18,14 @@ git clone git@github.com:tieutantan/SSH-Key-Tools.git
 # Interactive mode (menu)
 ./ssh-tools.sh
 
-# Generate key for 1 repository
+# Generate key for a GitHub repository
 ./ssh-tools.sh git@github.com:user/repo.git
 
-# Generate keys for multiple repositories at once
-./ssh-tools.sh git@github.com:user/repo-a.git git@github.com:user/repo-b.git
+# Generate key for a GitLab project
+./ssh-tools.sh git@gitlab.com:group/project.git
+
+# Generate keys for multiple providers at once
+./ssh-tools.sh git@github.com:user/repo.git git@bitbucket.org:team/project.git
 
 # List all existing SSH keys and clone commands
 ./ssh-tools.sh --list
@@ -32,22 +37,24 @@ git clone git@github.com:tieutantan/SSH-Key-Tools.git
 ./ssh-tools.sh --help
 ```
 
+The provider (github, gitlab, bitbucket, etc.) is **auto-detected** from the URL.
+
 ### Key naming convention
 
 | Component | Format | Example |
 |---|---|---|
-| Key file | `~/.ssh/id_ed25519_<repo_name>` | `~/.ssh/id_ed25519_dudu-bot` |
-| Host alias | `github-<repo_name>` | `github-dudu-bot` |
+| Key file | `~/.ssh/id_ed25519_<repo_name>` | `~/.ssh/id_ed25519_my-app` |
+| Host alias | `<provider>-<repo_name>` | `github-my-app`, `gitlab-my-app` |
 
 ### SSH Config
 
-The script automatically adds a host alias to `~/.ssh/config`, **without overwriting** the original `github.com` entry:
+The script automatically adds a host alias to `~/.ssh/config`, **without overwriting** the original host entry:
 
 ```
-Host github-dudu-bot
+Host github-my-app
     HostName github.com
     User git
-    IdentityFile ~/.ssh/id_ed25519_dudu-bot
+    IdentityFile ~/.ssh/id_ed25519_my-app
     AddKeysToAgent yes
     IdentitiesOnly yes
 ```
@@ -55,12 +62,12 @@ Host github-dudu-bot
 Clone command using the host alias:
 
 ```shell
-git clone git@github-dudu-bot:user/dudu-bot.git
+git clone git@github-my-app:user/my-app.git
 ```
 
-### Add to GitHub Deploy Keys
+### Add Deploy Key
 
-After running the script, copy the displayed public key and add it at:
+After running the script, copy the displayed public key and add it to your git provider:
 
 ```
 Repository → Settings → Deploy keys → Add deploy key

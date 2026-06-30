@@ -2,7 +2,8 @@
 
 ################################################################################
 # SSH Key Generation Script
-# Purpose: Generate SSH key pairs for multiple GitHub repositories
+# Purpose: Generate SSH key pairs for multiple git repositories
+#          Supports GitHub, GitLab, Bitbucket, and any custom SSH git host.
 # Usage:
 #   Interactive mode:        ./ssh-tools.sh
 #   Single repository:       ./ssh-tools.sh git@github.com:user/repo.git
@@ -12,8 +13,9 @@
 #   Show help:               ./ssh-tools.sh --help
 #
 # Each repository gets its own key: ~/.ssh/id_ed25519_<repo_name>
-# SSH config uses Host aliases: Host github-<repo_name>
-# The original github.com entry is never overwritten.
+# SSH config uses Host aliases: Host <provider>-<repo_name>
+#   where <provider> is detected from the URL (e.g. github, bitbucket, gitlab).
+# The original host entry (e.g. github.com) is never overwritten.
 #
 # NOTE: This script intentionally does NOT use set -e.
 # We use explicit error handling everywhere for clarity and compatibility.
@@ -52,20 +54,27 @@ print_warning() { echo -e "${YELLOW}⚠ $1${NC}"; }
 # ═══════════════════════════════════════════════════════════════════════════
 SSH_DIR="$HOME/.ssh"
 SSH_CONFIG_FILE="$SSH_DIR/config"
-HOST_PREFIX="github"
 
 # These are set by detect_key_type()
 KEY_TYPE=""
 KEY_PREFIX=""
+
+# All supported key prefixes (used by list, remove, and detect functions)
+SUPPORTED_KEY_PREFIXES=("id_ed25519" "id_rsa")
+
+# These are detected from the git URL per-repository
+PROVIDER=""       # e.g. github, bitbucket, gitlab
+PROVIDER_HOST=""  # e.g. github.com, bitbucket.org, gitlab.com
+HOST_PREFIX=""    # alias prefix, same as provider name
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DETECT KEY TYPE
 # ═══════════════════════════════════════════════════════════════════════════
 
 detect_key_type() {
-    # First ensure ssh-tools exists
-    if ! command -v ssh-tools &> /dev/null; then
-        print_error "'ssh-tools' not found. Install it with: apt-get install openssh-client -y"
+    # First ensure ssh-keygen exists
+    if ! command -v ssh-keygen &> /dev/null; then
+        print_error "'ssh-keygen' not found. Install it with: apt-get install openssh-client -y"
         exit 1
     fi
 
@@ -82,7 +91,7 @@ detect_key_type() {
 
     # Try ED25519 first
     printf "  Testing ED25519 support... "
-    if ssh-tools -t ed25519 -f "$test_key" -N "" -C "test" > /dev/null 2>&1; then
+    if ssh-keygen -t ed25519 -f "$test_key" -N "" -C "test" > /dev/null 2>&1; then
         printf "%s%s%s\n" "$GREEN" "supported" "$NC"
         KEY_TYPE="ed25519"
         KEY_PREFIX="id_ed25519"
@@ -94,7 +103,7 @@ detect_key_type() {
 
     # Fallback to RSA 4096
     printf "  Testing RSA 4096 support... "
-    if ssh-tools -t rsa -b 4096 -f "$test_key" -N "" -C "test" > /dev/null 2>&1; then
+    if ssh-keygen -t rsa -b 4096 -f "$test_key" -N "" -C "test" > /dev/null 2>&1; then
         printf "%s%s%s\n" "$GREEN" "supported" "$NC"
         KEY_TYPE="rsa"
         KEY_PREFIX="id_rsa"
@@ -105,7 +114,7 @@ detect_key_type() {
     printf "%s%s%s\n" "$RED" "failed" "$NC"
 
     rm -rf "$test_dir"
-    print_error "ssh-tools is available but neither ED25519 nor RSA 4096 work."
+    print_error "ssh-keygen is available but neither ED25519 nor RSA 4096 work."
     print_error "Try: apt-get update && apt-get install --reinstall openssh-client -y"
     exit 1
 }
@@ -114,13 +123,48 @@ detect_key_type() {
 # HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Extract repo name from a GitHub SSH URL
-# Input:  git@github.com:user/My-Repo.git
+# Detect git provider from URL and set PROVIDER / PROVIDER_HOST / HOST_PREFIX
+# Input:  git@github.com:user/repo.git
+#         git@bitbucket.org:user/repo.git
+#         git@gitlab.com:user/repo.git
+detect_provider() {
+    local url="$1"
+    if [[ "$url" == *"@github.com"* ]]; then
+        PROVIDER="github"
+        PROVIDER_HOST="github.com"
+    elif [[ "$url" == *"@bitbucket.org"* ]]; then
+        PROVIDER="bitbucket"
+        PROVIDER_HOST="bitbucket.org"
+    elif [[ "$url" == *"@gitlab.com"* ]]; then
+        PROVIDER="gitlab"
+        PROVIDER_HOST="gitlab.com"
+    else
+        # Extract host from custom git URL: git@host:path/repo.git or ssh://git@host/path/repo.git
+        if [[ "$url" =~ ^git@([^:]+): ]]; then
+            PROVIDER="${BASH_REMATCH[1]}"
+            PROVIDER_HOST="${BASH_REMATCH[1]}"
+        elif [[ "$url" =~ ^ssh://git@([^/]+) ]]; then
+            local extracted="${BASH_REMATCH[1]}"
+            # Strip port number if present (e.g. github.com:22 -> github.com)
+            PROVIDER="${extracted%:*}"
+            PROVIDER_HOST="${extracted%:*}"
+        else
+            print_error "Unrecognized git URL format: $url"
+            print_error "Expected format: git@<host>:user/repo.git"
+            exit 1
+        fi
+    fi
+    HOST_PREFIX="$PROVIDER"
+}
+
+# Extract repo name from a git SSH URL
+# Input:  git@github.com:user/My-Repo.git  or  git@bitbucket.org:user/My-Repo.git
 # Output: my-repo
 parse_repo_name() {
     local url="$1"
     local repo_full
-    repo_full="${url#*github.com:*}"
+    # Extract everything after the first colon (git@host:...), strip .git suffix
+    repo_full="${url#*:}"
     repo_full="${repo_full%.git}"
     echo "$repo_full" | sed 's/.*\///' | tr '[:upper:]' '[:lower:]'
 }
@@ -131,7 +175,7 @@ parse_repo_name() {
 parse_repo_full() {
     local url="$1"
     local repo_full
-    repo_full="${url#*github.com:*}"
+    repo_full="${url#*:}"
     repo_full="${repo_full%.git}"
     echo "$repo_full"
 }
@@ -173,23 +217,44 @@ ensure_ssh_config() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
+# BACKUP SSH CONFIG
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Create a timestamped backup of the SSH config file
+backup_ssh_config() {
+    local backup_file
+    backup_file="${SSH_CONFIG_FILE}.backup.$(date +%s)"
+    cp "$SSH_CONFIG_FILE" "$backup_file" 2>/dev/null || true
+    print_step "Backed up SSH config to: $backup_file"
+    echo "$backup_file"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
 # LIST FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Reconstruct clone command from a public key's comment + repo name
 # Comment is usually the original SSH URL: git@github.com:user/repo.git
+# Works with any provider (github, bitbucket, gitlab, etc.)
 make_clone_command() {
     local name="$1"    # repo name (e.g. xep-hinh)
     local comment="$2" # comment from public key (original SSH URL)
     if [ -z "$comment" ]; then
         return 1
     fi
-    local repo_path="${comment#*github.com:*}"
-    repo_path="${repo_path%.git}"
-    if [ -z "$repo_path" ] || [ "$repo_path" = "$comment" ]; then
+    # Extract host from comment: git@<host>:user/repo.git
+    local host repo_path
+    if [[ "$comment" =~ ^git@([^:]+):(.+)$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        repo_path="${BASH_REMATCH[2]}"
+    else
         return 1
     fi
-    echo "git@${HOST_PREFIX}-${name}:${repo_path}.git"
+    repo_path="${repo_path%.git}"
+    if [ -z "$repo_path" ] || [ -z "$host" ]; then
+        return 1
+    fi
+    echo "git@${host}-${name}:${repo_path}.git"
 }
 
 # List all existing SSH keys managed by this script
@@ -202,7 +267,7 @@ list_existing_keys() {
     local key_file
     local prefix
 
-    for prefix in "id_ed25519" "id_rsa"; do
+    for prefix in "${SUPPORTED_KEY_PREFIXES[@]}"; do
         for key_file in "$SSH_DIR"/"${prefix}"_*; do
             [ -f "$key_file" ] || continue
             local pub_file="${key_file}.pub"
@@ -212,18 +277,25 @@ list_existing_keys() {
             name="${name#_}"
 
             if [ -f "$pub_file" ]; then
-                local comment fingerprint key_type_str clone_url
+                local comment fingerprint key_type_str clone_url host_from_comment
                 comment=$(awk '{print $3}' "$pub_file" 2>/dev/null)
-                fingerprint=$(ssh-tools -lf "$key_file" 2>/dev/null | awk '{print $2}')
-                key_type_str=$(ssh-tools -lf "$key_file" 2>/dev/null | awk '{print $1}')
+                fingerprint=$(ssh-keygen -lf "$key_file" 2>/dev/null | awk '{print $2}')
+                key_type_str=$(ssh-keygen -lf "$key_file" 2>/dev/null | awk '{print $1}')
 
                 clone_url=$(make_clone_command "$name" "$comment")
+
+                # Extract host from comment for display
+                if [[ "$comment" =~ ^git@([^:]+): ]]; then
+                    host_from_comment="${BASH_REMATCH[1]}"
+                else
+                    host_from_comment="?"
+                fi
 
                 echo -e "  ${GREEN}▶${NC} ${BOLD}${name}${NC}"
                 echo -e "    Key:      ${CYAN}${prefix}_${name}${NC} (${key_type_str:-unknown})"
                 echo -e "    Fingerprint: ${fingerprint:-N/A}"
                 echo -e "    Comment:  ${comment:-N/A}"
-                echo -e "    Host:     ${YELLOW}${HOST_PREFIX}-${name}${NC}"
+                echo -e "    Host:     ${YELLOW}${host_from_comment}-${name}${NC}"
                 if [ -n "$clone_url" ]; then
                     echo -e "    Clone:    ${GREEN}git clone ${clone_url}${NC}"
                 fi
@@ -243,9 +315,10 @@ list_existing_keys() {
     fi
 }
 
-# List all GitHub-related entries in SSH config
+# List all entries in SSH config managed by this script
+# (matches Host entries whose alias contains a '-' prefix from provider detection)
 list_ssh_config_entries() {
-    print_header "SSH Config Entries (GitHub)"
+    print_header "SSH Config Entries"
 
     if [ ! -f "$SSH_CONFIG_FILE" ]; then
         print_warning "SSH config file does not exist yet."
@@ -259,8 +332,10 @@ list_ssh_config_entries() {
     local current_file=""
 
     while IFS= read -r line; do
-        if [[ "$line" =~ ^Host[[:space:]]+(github) ]]; then
-            current_host=$(echo "$line" | awk '{print $2}')
+        # Match Host entries where the IdentityFile points to a managed key
+        # (i.e. contains id_ed25519_ or id_rsa_ in the SSH dir)
+        if [[ "$line" =~ ^Host[[:space:]]+([a-zA-Z0-9]+-[a-zA-Z0-9].*)$ ]]; then
+            current_host="${BASH_REMATCH[1]}"
             in_block=true
             current_file=""
         elif [[ "$line" =~ ^Host[[:space:]]+ ]]; then
@@ -268,11 +343,22 @@ list_ssh_config_entries() {
         elif $in_block && [[ "$line" =~ IdentityFile[[:space:]]+(.+) ]]; then
             current_file=$(echo "$line" | awk '{print $2}')
         elif $in_block && [[ -z "$line" || "$line" =~ ^[[:space:]]*$ ]]; then
-            if [ -n "$current_host" ]; then
-                echo -e "  ${GREEN}▶${NC} ${BOLD}${current_host}${NC}"
-                echo -e "    IdentityFile: ${current_file:-N/A}"
-                echo ""
-                ((count++))
+            if [ -n "$current_host" ] && [ -n "$current_file" ]; then
+                # Only show if the IdentityFile matches a managed key pattern
+                local is_managed=false
+                local p
+                for p in "${SUPPORTED_KEY_PREFIXES[@]}"; do
+                    if [[ "$current_file" == *"${SSH_DIR}/${p}_"* ]]; then
+                        is_managed=true
+                        break
+                    fi
+                done
+                if [ "$is_managed" = true ]; then
+                    echo -e "  ${GREEN}▶${NC} ${BOLD}${current_host}${NC}"
+                    echo -e "    IdentityFile: ${current_file:-N/A}"
+                    echo ""
+                    ((count++))
+                fi
             fi
             in_block=false
             current_host=""
@@ -280,18 +366,28 @@ list_ssh_config_entries() {
         fi
     done < "$SSH_CONFIG_FILE"
 
-    if [ -n "$current_host" ]; then
-        echo -e "  ${GREEN}▶${NC} ${BOLD}${current_host}${NC}"
-        echo -e "    IdentityFile: ${current_file:-N/A}"
-        echo ""
-        ((count++))
+    if [ -n "$current_host" ] && [ -n "$current_file" ]; then
+        local is_managed=false
+        local p
+        for p in "${SUPPORTED_KEY_PREFIXES[@]}"; do
+            if [[ "$current_file" == *"${SSH_DIR}/${p}_"* ]]; then
+                is_managed=true
+                break
+            fi
+        done
+        if [ "$is_managed" = true ]; then
+            echo -e "  ${GREEN}▶${NC} ${BOLD}${current_host}${NC}"
+            echo -e "    IdentityFile: ${current_file:-N/A}"
+            echo ""
+            ((count++))
+        fi
     fi
 
     if [ "$count" -eq 0 ]; then
-        print_warning "No GitHub entries found in SSH config."
+        print_warning "No managed entries found in SSH config."
         echo ""
     else
-        print_success "Found $count GitHub host entrie(s)"
+        print_success "Found $count managed host entr(y/ies)"
         echo ""
     fi
 }
@@ -310,10 +406,12 @@ host_alias_exists() {
     return 1
 }
 
-# Check if a host entry matches github.com generic host
-is_github_com_host() {
+# Check if a host entry is a bare provider host (github.com, bitbucket.org, gitlab.com, etc.)
+# These are the original host entries — we never delete them to avoid breaking existing setup.
+is_original_host() {
     local host_alias="$1"
-    [ "$host_alias" = "github.com" ]
+    # Bare hosts are single-part names (no dash) like "github.com", "bitbucket.org"
+    [[ "$host_alias" != *"-"* ]]
 }
 
 # Add an SSH config entry for a host alias
@@ -326,10 +424,7 @@ add_ssh_config_entry() {
     ensure_ssh_config
 
     # Backup config
-    local backup_file
-    backup_file="${SSH_CONFIG_FILE}.backup.$(date +%s)"
-    cp "$SSH_CONFIG_FILE" "$backup_file" 2>/dev/null || true
-    print_step "Backed up SSH config to: $backup_file"
+    backup_ssh_config > /dev/null
 
     # Check if host alias already exists
     if host_alias_exists "$host_alias"; then
@@ -350,7 +445,7 @@ add_ssh_config_entry() {
     {
         echo ""
         echo "Host ${host_alias}"
-        printf "\tHostName github.com\n"
+        printf "\tHostName %s\n" "${PROVIDER_HOST}"
         printf "\tUser git\n"
         printf "\tIdentityFile %s\n" "${key_path}"
         printf "\tAddKeysToAgent yes\n"
@@ -359,27 +454,27 @@ add_ssh_config_entry() {
     } >> "$SSH_CONFIG_FILE"
 
     chmod 600 "$SSH_CONFIG_FILE" 2>/dev/null || true
-    print_success "SSH config updated: added host '${host_alias}'"
+    print_success "SSH config updated: added host '${host_alias}' (${PROVIDER_HOST})"
 }
 
 # Remove a host entry from SSH config
 remove_ssh_config_entry() {
     local host_alias="$1"
 
+    if [ -z "$host_alias" ]; then
+        return 1
+    fi
+
     if ! host_alias_exists "$host_alias"; then
-        print_warning "Host alias '${host_alias}' not found in SSH config. Nothing to remove."
         return 1
     fi
 
-    if is_github_com_host "$host_alias"; then
-        print_error "Refusing to remove generic 'github.com' host entry. Use --remove only for aliases like 'github-<name>'."
+    if is_original_host "$host_alias"; then
+        print_error "Refusing to remove original host entry '${host_alias}'. Use --remove only for aliases like '<provider>-<name>'."
         return 1
     fi
 
-    local backup_file
-    backup_file="${SSH_CONFIG_FILE}.backup.$(date +%s)"
-    cp "$SSH_CONFIG_FILE" "$backup_file" 2>/dev/null || true
-    print_step "Backed up SSH config to: $backup_file"
+    backup_ssh_config > /dev/null
 
     sed -i.bak "/^Host ${host_alias}$/,/^$/d" "$SSH_CONFIG_FILE" 2>/dev/null || {
         print_error "Failed to remove host entry '${host_alias}' from SSH config"
@@ -400,18 +495,22 @@ remove_ssh_config_entry() {
 generate_key_for_repo() {
     local repo_url="$1"
     local repo_name repo_full key_path host_alias
+
+    # Detect provider (github, bitbucket, gitlab, etc.) from URL
+    detect_provider "$repo_url"
+
     repo_name=$(parse_repo_name "$repo_url")
     repo_full=$(parse_repo_full "$repo_url")
     key_path=$(get_key_path "$repo_name")
     host_alias=$(get_host_alias "$repo_name")
 
-    print_subheader "Repository: ${repo_full}"
+    print_subheader "Repository: ${repo_full}  (${PROVIDER})"
 
     # Check if key already exists
     if [ -f "$key_path" ]; then
         print_warning "SSH key already exists: ${key_path}"
         local fingerprint
-        fingerprint=$(ssh-tools -lf "$key_path" 2>/dev/null | awk '{print $2}')
+        fingerprint=$(ssh-keygen -lf "$key_path" 2>/dev/null | awk '{print $2}')
         echo -e "  Fingerprint: ${fingerprint:-N/A}"
         echo ""
         read -r -p "  Overwrite this key? (y/N): " -n 1
@@ -436,8 +535,8 @@ generate_key_for_repo() {
     print_step "Generating ${KEY_TYPE^^} SSH key: ${KEY_PREFIX}_${repo_name}"
     echo ""
 
-    if ! ssh-tools -t "$KEY_TYPE" "${key_bits_args[@]}" -f "$key_path" -N "" -C "$repo_url" 2>&1; then
-        print_error "ssh-tools failed!"
+    if ! ssh-keygen -t "$KEY_TYPE" "${key_bits_args[@]}" -f "$key_path" -N "" -C "$repo_url" 2>&1; then
+        print_error "ssh-keygen failed!"
         print_error "Try: apt-get update && apt-get install openssh-client -y"
         exit 1
     fi
@@ -502,7 +601,7 @@ show_result() {
         public_key="[public key file not found]"
     fi
 
-    print_header "SSH Public Key (Copy to GitHub Deploy Keys)"
+    print_header "SSH Public Key"
 
     echo -e "${YELLOW}────────────────────────────────────────────────────────────────${NC}"
     echo "$public_key"
@@ -514,7 +613,7 @@ show_result() {
     echo -e "  ${GREEN}git clone ${clone_url}${NC}"
     echo ""
 
-    echo -e "  ${CYAN}📝 Add this public key to GitHub:${NC}"
+    echo -e "  ${CYAN}📝 Add this public key to your git provider (${PROVIDER}):${NC}"
     echo -e "     Repository → Settings → Deploy keys → Add deploy key"
     echo ""
 }
@@ -526,15 +625,27 @@ show_result() {
 remove_key() {
     local repo_name="$1"
     local host_alias
-    host_alias=$(get_host_alias "$repo_name")
+
+    # Validate repo name — reject empty, path separators, relative paths, or grep-unsafe chars
+    if [ -z "$repo_name" ] || [[ "$repo_name" == *"/"* ]] || [[ "$repo_name" == *"\\"* ]] || [[ "$repo_name" == *".."* ]] || [[ "$repo_name" =~ [^a-zA-Z0-9_-] ]]; then
+        print_error "Invalid repository name: '${repo_name}'"
+        print_error "Repository name must be alphanumeric, may contain hyphens or underscores (e.g., 'my-app')."
+        return 1
+    fi
 
     print_header "Removing SSH Key for: ${repo_name}"
 
     local found=false
     local prefix kp
 
-    for prefix in "id_ed25519" "id_rsa"; do
+    # Remove key files first
+    for prefix in "${SUPPORTED_KEY_PREFIXES[@]}"; do
         kp="$SSH_DIR/${prefix}_${repo_name}"
+
+        # Remove from SSH agent BEFORE deleting the file
+        if [ -f "$kp" ] && command -v ssh-add &> /dev/null; then
+            ssh-add -d "$kp" 2>/dev/null && print_success "Removed ${prefix}_${repo_name} from SSH agent" || true
+        fi
 
         if [ -f "$kp" ]; then
             rm -f "$kp" 2>/dev/null || true
@@ -547,14 +658,19 @@ remove_key() {
             found=true
             print_success "Removed public key: ${prefix}_${repo_name}.pub"
         fi
-
-        if [ -f "$kp" ] && command -v ssh-add &> /dev/null; then
-            ssh-add -d "$kp" 2>/dev/null && print_success "Removed ${prefix}_${repo_name} from SSH agent" || true
-        fi
     done
 
-    if remove_ssh_config_entry "$host_alias"; then
-        found=true
+    # Now remove SSH config entries — there might be multiple providers for the same repo name
+    if [ -f "$SSH_CONFIG_FILE" ]; then
+        local host_aliases
+        host_aliases=$(grep -E "^Host [a-zA-Z0-9]+-${repo_name}$" "$SSH_CONFIG_FILE" 2>/dev/null | awk '{print $2}')
+        if [ -n "$host_aliases" ]; then
+            while IFS= read -r ha; do
+                if remove_ssh_config_entry "$ha"; then
+                    found=true
+                fi
+            done <<< "$host_aliases"
+        fi
     fi
 
     echo ""
@@ -571,55 +687,62 @@ remove_key() {
 # ═══════════════════════════════════════════════════════════════════════════
 
 show_interactive_menu() {
-    print_header "SSH Key Manager — Interactive Menu"
+    while true; do
+        print_header "SSH Key Manager — Interactive Menu"
 
-    echo -e "  ${BOLD}1.${NC} Generate new SSH key(s) for repository URL(s)"
-    echo -e "  ${BOLD}2.${NC} List all existing SSH keys"
-    echo -e "  ${BOLD}3.${NC} Remove an existing SSH key"
-    echo -e "  ${BOLD}q.${NC} Quit"
-    echo ""
-    read -r -p "  Select an option [1/2/3/q]: " menu_choice
-    echo ""
+        echo -e "  ${BOLD}1.${NC} Generate new SSH key(s) for repository URL(s)"
+        echo -e "  ${BOLD}2.${NC} List all existing SSH keys"
+        echo -e "  ${BOLD}3.${NC} Remove an existing SSH key"
+        echo -e "  ${BOLD}q.${NC} Quit"
+        echo ""
+        read -r -p "  Select an option [1/2/3/q]: " menu_choice
+        echo ""
 
-    case "$menu_choice" in
-        1)
-            print_step "Enter GitHub repository URL(s) (space-separated for multiple):"
-            echo ""
-            read -r -p "  URL(s): " repo_input
-            echo ""
-            if [ -z "$repo_input" ]; then
-                print_error "No URL entered."
+        case "$menu_choice" in
+            1)
+                print_step "Enter git repository URL(s) (space-separated for multiple):"
                 echo ""
-                return
-            fi
-            # shellcheck disable=SC2086
-            process_repos $repo_input
-            ;;
-        2)
-            list_all
-            ;;
-        3)
-            print_step "Enter the repository name to remove (e.g., 'dudu-bot'):"
-            echo ""
-            read -r -p "  Name: " remove_name
-            echo ""
-            if [ -z "$remove_name" ]; then
-                print_error "No name entered."
+                read -r -p "  URL(s): " repo_input
                 echo ""
-                return
-            fi
-            remove_key "$remove_name"
-            ;;
-        q|Q)
-            print_step "Goodbye!"
-            echo ""
-            exit 0
-            ;;
-        *)
-            print_error "Invalid option."
-            echo ""
-            ;;
-    esac
+                if [ -z "$repo_input" ]; then
+                    print_error "No URL entered."
+                    echo ""
+                    continue
+                fi
+                detect_key_type
+                ensure_ssh_config
+                # Disable pathname expansion to prevent glob characters in URL from expanding
+                set -f
+                # shellcheck disable=SC2086
+                process_repos $repo_input
+                set +f
+                ;;
+            2)
+                list_all
+                ;;
+            3)
+                print_step "Enter the repository name to remove (e.g., 'dudu-bot'):"
+                echo ""
+                read -r -p "  Name: " remove_name
+                echo ""
+                if [ -z "$remove_name" ]; then
+                    print_error "No name entered."
+                    echo ""
+                    continue
+                fi
+                remove_key "$remove_name"
+                ;;
+            q|Q)
+                print_step "Goodbye!"
+                echo ""
+                exit 0
+                ;;
+            *)
+                print_error "Invalid option."
+                echo ""
+                ;;
+        esac
+    done
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -649,7 +772,7 @@ process_repos() {
         echo ""
     done
 
-    print_success "All done! Generated SSH keys for $# repository/repos."
+    print_success "All done! Processed $# repository/repos."
     echo ""
 }
 
@@ -669,7 +792,7 @@ list_all() {
 show_usage() {
     echo ""
     echo -e "${BLUE}${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}${BOLD}║  SSH Key Generator — Multi-Repository Edition              ║${NC}"
+    echo -e "${BLUE}${BOLD}║  SSH Key Generator — Multi-Repository / Multi-Provider     ║${NC}"
     echo -e "${BLUE}${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo "Usage:"
@@ -680,15 +803,19 @@ show_usage() {
     echo "  ./ssh-tools.sh --remove <repo_name>     Remove a key and its SSH config entry"
     echo "  ./ssh-tools.sh --help                   Show this help message"
     echo ""
+    echo "Supported providers: GitHub, GitLab, Bitbucket, any custom SSH git host"
+    echo ""
     echo "Examples:"
-    echo "  ./ssh-tools.sh git@github.com:user/Pikatrue.git"
-    echo "  ./ssh-tools.sh git@github.com:user/repo-a.git git@github.com:user/repo-b.git"
+    echo "  ./ssh-tools.sh git@github.com:user/My-App.git"
+    echo "  ./ssh-tools.sh git@gitlab.com:group/project.git"
+    echo "  ./ssh-tools.sh git@bitbucket.org:team/repo.git"
+    echo "  ./ssh-tools.sh git@github.com:user/repo-a.git git@bitbucket.org:team/repo-b.git"
     echo "  ./ssh-tools.sh --list"
-    echo "  ./ssh-tools.sh --remove pikatrue"
+    echo "  ./ssh-tools.sh --remove my-app"
     echo ""
     echo "Key naming:  ~/.ssh/id_ed25519_<repo_name> or ~/.ssh/id_rsa_<repo_name>"
     echo "             (auto-detects supported key type, prefers ED25519)"
-    echo "Host alias:  ${HOST_PREFIX}-<repo_name>  (in ~/.ssh/config)"
+    echo "Host alias:  <provider>-<repo_name>  (e.g. github-my-app, in ~/.ssh/config)"
     echo ""
 }
 
