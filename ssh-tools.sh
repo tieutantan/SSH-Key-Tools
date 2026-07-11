@@ -254,7 +254,10 @@ make_clone_command() {
     if [ -z "$repo_path" ] || [ -z "$host" ]; then
         return 1
     fi
-    echo "git@${host}-${name}:${repo_path}.git"
+    # Re-detect provider from the comment to use the correct HOST_PREFIX
+    # (e.g., for github.com, HOST_PREFIX="github", not "github.com")
+    detect_provider "$comment"
+    echo "git@${HOST_PREFIX}-${name}:${repo_path}.git"
 }
 
 # List all existing SSH keys managed by this script
@@ -339,7 +342,26 @@ list_ssh_config_entries() {
             in_block=true
             current_file=""
         elif [[ "$line" =~ ^Host[[:space:]]+ ]]; then
+            # Emit any pending entry before switching to a new Host block
+            if $in_block && [ -n "$current_host" ] && [ -n "$current_file" ]; then
+                local is_managed=false
+                local p
+                for p in "${SUPPORTED_KEY_PREFIXES[@]}"; do
+                    if [[ "$current_file" == *"${SSH_DIR}/${p}_"* ]]; then
+                        is_managed=true
+                        break
+                    fi
+                done
+                if [ "$is_managed" = true ]; then
+                    echo -e "  ${GREEN}▶${NC} ${BOLD}${current_host}${NC}"
+                    echo -e "    IdentityFile: ${current_file:-N/A}"
+                    echo ""
+                    ((count++))
+                fi
+            fi
             in_block=false
+            current_host=""
+            current_file=""
         elif $in_block && [[ "$line" =~ IdentityFile[[:space:]]+(.+) ]]; then
             current_file=$(echo "$line" | awk '{print $2}')
         elif $in_block && [[ -z "$line" || "$line" =~ ^[[:space:]]*$ ]]; then
@@ -436,8 +458,13 @@ add_ssh_config_entry() {
             print_step "Skipped updating SSH config entry '${host_alias}'"
             return 0
         fi
-        sed -i.bak "/^Host ${host_alias}$/,/^$/d" "$SSH_CONFIG_FILE" 2>/dev/null || true
-        rm -f "$SSH_CONFIG_FILE.bak" 2>/dev/null || true
+        awk -v host="${host_alias}" '
+          $0 ~ "^Host " host "$" { skip = 1; next }
+          skip && /^$/ { skip = 0; next }
+          skip && /^Host / { skip = 0 }
+          skip { next }
+          { print }
+        ' "$SSH_CONFIG_FILE" > "${SSH_CONFIG_FILE}.tmp" && mv "${SSH_CONFIG_FILE}.tmp" "$SSH_CONFIG_FILE"
         print_step "Removed old entry for '${host_alias}'"
     fi
 
@@ -476,11 +503,16 @@ remove_ssh_config_entry() {
 
     backup_ssh_config > /dev/null
 
-    sed -i.bak "/^Host ${host_alias}$/,/^$/d" "$SSH_CONFIG_FILE" 2>/dev/null || {
+    awk -v host="${host_alias}" '
+      $0 ~ "^Host " host "$" { skip = 1; next }
+      skip && /^$/ { skip = 0; next }
+      skip && /^Host / { skip = 0 }
+      skip { next }
+      { print }
+    ' "$SSH_CONFIG_FILE" > "${SSH_CONFIG_FILE}.tmp" && mv "${SSH_CONFIG_FILE}.tmp" "$SSH_CONFIG_FILE" || {
         print_error "Failed to remove host entry '${host_alias}' from SSH config"
         return 1
     }
-    rm -f "$SSH_CONFIG_FILE.bak" 2>/dev/null || true
 
     chmod 600 "$SSH_CONFIG_FILE" 2>/dev/null || true
     print_success "Removed host '${host_alias}' from SSH config"
