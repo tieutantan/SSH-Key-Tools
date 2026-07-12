@@ -7,7 +7,7 @@ Each repo gets its own dedicated SSH key without overwriting others.
 ### Install
 
 ```shell
-git clone git@github.com:tieutantan/SSH-Key-Tools.git
+git clone https://github.com/tieutantan/SSH-Key-Tools.git
 cd SSH-Key-Tools
 chmod +x ssh-tools.sh
 ```
